@@ -14,11 +14,19 @@ let package = Package(
     ],
     products: [
         .library(
+            name: "SwiftToolkit",
+            targets: ["SwiftToolkit"]
+        ),
+        .library(
             name: "SwiftToolkitUI",
             targets: ["SwiftToolkitUI"]
         )
     ],
     targets: [
+        .target(
+            name: "SwiftToolkit",
+            path: "Sources/SwiftToolkit"
+        ),
         .target(
             name: "SwiftToolkitUI",
             path: "Sources/SwiftToolkitUI"
