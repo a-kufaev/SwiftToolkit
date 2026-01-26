@@ -20,6 +20,10 @@ let package = Package(
         .library(
             name: "SwiftToolkitUI",
             targets: ["SwiftToolkitUI"]
+        ),
+        .library(
+            name: "SwiftToolkitVideo",
+            targets: ["SwiftToolkitVideo"]
         )
     ],
     targets: [
@@ -30,6 +34,11 @@ let package = Package(
         .target(
             name: "SwiftToolkitUI",
             path: "Sources/SwiftToolkitUI"
+        ),
+        .target(
+            name: "SwiftToolkitVideo",
+            dependencies: ["SwiftToolkit", "SwiftToolkitUI"],
+            path: "Sources/SwiftToolkitVideo"
         )
     ]
 )
