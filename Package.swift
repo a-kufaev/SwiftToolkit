@@ -24,7 +24,14 @@ let package = Package(
         .library(
             name: "SwiftToolkitVideo",
             targets: ["SwiftToolkitVideo"]
+        ),
+        .library(
+            name: "SwiftToolkitImage",
+            targets: ["SwiftToolkitImage"]
         )
+    ],
+    dependencies: [
+        .package(url: "https://github.com/onevcat/Kingfisher.git", from: "8.0.0")
     ],
     targets: [
         .target(
@@ -39,6 +46,13 @@ let package = Package(
             name: "SwiftToolkitVideo",
             dependencies: ["SwiftToolkit", "SwiftToolkitUI"],
             path: "Sources/SwiftToolkitVideo"
+        ),
+        .target(
+            name: "SwiftToolkitImage",
+            dependencies: [
+                .product(name: "Kingfisher", package: "Kingfisher")
+            ],
+            path: "Sources/SwiftToolkitImage"
         )
     ]
 )
