@@ -53,6 +53,11 @@ let package = Package(
                 .product(name: "Kingfisher", package: "Kingfisher")
             ],
             path: "Sources/SwiftToolkitImage"
+        ),
+        .testTarget(
+            name: "SwiftToolkitTests",
+            dependencies: ["SwiftToolkit"],
+            path: "Tests/SwiftToolkitTests"
         )
     ]
 )
