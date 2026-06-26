@@ -40,7 +40,16 @@ public struct DefaultCodable<Default: DefaultCodableStrategy>: Sendable {
 extension DefaultCodable: Decodable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        wrappedValue = (try? container.decode(Default.DefaultValue.self)) ?? Default.defaultValue
+        do {
+            wrappedValue = try container.decode(Default.DefaultValue.self)
+        } catch {
+            // The key is present but its value is invalid — a genuine defect worth reporting. A missing
+            // key never reaches here (KeyedDecodingContainer.decode handles it via decodeIfPresent), so
+            // legitimately absent fields stay quiet.
+            (decoder.userInfo[.lossyDecodingReporter] as? LossyDecodingReporter)?
+                .lossyDecodingDidDrop(error, codingPath: container.codingPath)
+            wrappedValue = Default.defaultValue
+        }
     }
 }
 

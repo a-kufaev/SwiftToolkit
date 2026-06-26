@@ -63,7 +63,7 @@ debouncer.debounce { await search(query) }
 BetterCodable-style property wrappers for resilient decoding:
 
 - **`@DefaultCodable`** + strategies (`@DefaultFalseCodable`, `@DefaultTrueCodable`).
-- **`@LossyCodableArray`** / **`@LossyOptionalCodable`** — tolerate invalid elements/values.
+- **`@LossyCodableArray`** / **`@LossyOptionalCodable`** — tolerate invalid elements/values, with an opt-in **`LossyDecodingReporter`** (`decoder.userInfo[.lossyDecodingReporter]`) to observe what they drop.
 - **`@DateValueCodable`** with `TimestampCodableStrategy` / `MillisecondsTimestampCodableStrategy`.
 - **`RawJSONObject`** — decode arbitrary, dynamically-shaped JSON.
 - **`SafetyEnum`** — forward-compatible enums that fall back to a `failure` case.

@@ -35,6 +35,8 @@ extension LossyCodableArray: Decodable where T: Decodable {
                 let value = try container.decode(T.self)
                 elements.append(value)
             } catch {
+                (decoder.userInfo[.lossyDecodingReporter] as? LossyDecodingReporter)?
+                    .lossyDecodingDidDrop(error, codingPath: container.codingPath)
                 _ = try? container.decode(AnyDecodableValue.self)
             }
         }
