@@ -56,7 +56,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftToolkitTests",
-            dependencies: ["SwiftToolkit"],
+            dependencies: ["SwiftToolkit", "SwiftToolkitVideo"],
             path: "Tests/SwiftToolkitTests"
         )
     ]
