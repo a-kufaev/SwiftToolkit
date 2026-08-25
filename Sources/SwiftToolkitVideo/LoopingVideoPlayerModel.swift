@@ -12,27 +12,35 @@
 #if canImport(UIKit)
 import AVKit
 
-/// Lightweight looping video model: AVQueuePlayer + AVPlayerLooper, exposes VideoPlayerMetrics.
+/// Lightweight looping video model: a single AVPlayer that seeks back to zero at end, exposes VideoPlayerMetrics.
 /// Reusable for feeds, previews, etc.
+///
+/// Deliberately not AVPlayerLooper: the looper plays replicas of a template item, which churns `currentItem`
+/// (breaking KVO-driven consumers), holds two decode sessions per player, re-buffers HLS on every cycle, and
+/// swallows template-asset failures so the item never reports `.failed`. One stable item keeps its status and
+/// errors observable and loops from its own buffer.
 @MainActor
 public final class LoopingVideoPlayerModel {
 
-    public let player: AVQueuePlayer
+    public let player: AVPlayer
     public let metrics = VideoPlayerMetrics()
 
     /// URL of the video the model is set to play; nil before the first `setVideo` and after `reset()`.
-    ///
-    /// Reflects the requested video rather than the player queue: AVPlayerLooper populates the queue on its own
-    /// schedule, so `player.currentItem` is still nil for a while after `setVideo` returns.
     public private(set) var currentURL: URL?
 
-    private var looper: AVPlayerLooper?
-    private var loopingItemsObservation: NSKeyValueObservation?
+    private var loopTask: Task<Void, Never>?
     private var preferredForwardBufferDuration: TimeInterval?
 
     public init() {
-        player = AVQueuePlayer()
+        player = AVPlayer()
+        // The loop seeks while the rate is still up; pausing at end would add a stop-start seam every cycle.
+        player.actionAtItemEnd = .none
         metrics.bind(player)
+    }
+
+    @MainActor
+    deinit {
+        loopTask?.cancel()
     }
 
     public func setVideo(url: URL) {
@@ -40,24 +48,22 @@ public final class LoopingVideoPlayerModel {
     }
 
     /// Loops the specified item.
-    ///
-    /// The item is a template only: AVPlayerLooper plays replicas of it and never the template itself, so the template
-    /// is deliberately not inserted into the queue. Enqueueing it would buffer a second copy of the same asset and
-    /// make it the current item until the looper inserts the replicas ahead of it.
     public func setVideo(item: AVPlayerItem) {
         reset()
         currentURL = (item.asset as? AVURLAsset)?.url
-        looper = AVPlayerLooper(player: player, templateItem: item)
-        applyPreferredForwardBufferDuration()
-        observeLoopingItems()
+        applyPreferredForwardBufferDuration(to: item)
+        player.replaceCurrentItem(with: item)
+        observeEnd(of: item)
     }
 
     /// Sets how far ahead of the playhead to buffer, or nil to let the system decide.
     ///
-    /// Applied to the replicas the looper plays, in any order relative to `setVideo`, and kept across `reset()`.
+    /// Applied to the current item, in any order relative to `setVideo`, and kept across `reset()`.
     public func setPreferredForwardBufferDuration(_ duration: TimeInterval?) {
         preferredForwardBufferDuration = duration
-        applyPreferredForwardBufferDuration()
+        if let item = player.currentItem {
+            applyPreferredForwardBufferDuration(to: item)
+        }
     }
 
     public func seek(to time: CMTime) {
@@ -73,13 +79,30 @@ public final class LoopingVideoPlayerModel {
     }
 
     public func reset() {
-        loopingItemsObservation?.invalidate()
-        loopingItemsObservation = nil
-        looper?.disableLooping()
-        looper = nil
+        loopTask?.cancel()
+        loopTask = nil
         currentURL = nil
         player.pause()
-        player.removeAllItems()
+        player.replaceCurrentItem(with: nil)
+    }
+}
+
+// MARK: - Looping
+
+extension LoopingVideoPlayerModel {
+
+    private func observeEnd(of item: AVPlayerItem) {
+        loopTask = Task { [weak self] in
+            let notifications = NotificationCenter.default.notifications(
+                named: .AVPlayerItemDidPlayToEndTime,
+                object: item
+            )
+            for await _ in notifications {
+                guard let self else { return }
+                // Position zero is a keyframe, so the exact seek costs nothing and cannot land mid-clip.
+                await player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+        }
     }
 }
 
@@ -87,19 +110,8 @@ public final class LoopingVideoPlayerModel {
 
 extension LoopingVideoPlayerModel {
 
-    /// Properties set on the template after the looper is created are not forwarded to the replicas, so the buffer
-    /// preference is re-applied whenever the looper publishes a new set of them.
-    private func observeLoopingItems() {
-        loopingItemsObservation = looper?.observe(\.loopingPlayerItems, options: [.new]) { [weak self] _, _ in
-            Task { @MainActor in
-                self?.applyPreferredForwardBufferDuration()
-            }
-        }
-    }
-
-    private func applyPreferredForwardBufferDuration() {
-        let duration = preferredForwardBufferDuration ?? .zero
-        looper?.loopingPlayerItems.forEach { $0.preferredForwardBufferDuration = duration }
+    private func applyPreferredForwardBufferDuration(to item: AVPlayerItem) {
+        item.preferredForwardBufferDuration = preferredForwardBufferDuration ?? .zero
     }
 }
 #endif

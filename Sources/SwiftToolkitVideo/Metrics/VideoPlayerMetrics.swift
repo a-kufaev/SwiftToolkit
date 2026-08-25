@@ -146,6 +146,10 @@ extension VideoPlayerMetrics {
     
     private func applyChangedCurrentTime(_ seconds: TimeInterval) {
         currentTime = seconds
+        // A seek-back loop restarts playback without any timeControl event; an advancing clock corrects the stale .ended.
+        if playbackState == .ended, playbackRate > 0 {
+            playbackState = .playing
+        }
         if seconds > 0, let start = playingStartedAt {
             timeToFirstFrame = Date().timeIntervalSince(start)
             playingStartedAt = nil
