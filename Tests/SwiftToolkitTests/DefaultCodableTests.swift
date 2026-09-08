@@ -36,6 +36,13 @@ struct DefaultCodableTests {
         #expect(model.ids == [1, 3])
     }
 
+    @Test("missing lossy array key decodes as empty")
+    func missingLossyArrayKeyDecodesAsEmpty() throws {
+        let json = Data(#"{"flag":true,"createdAt":0}"#.utf8)
+        let model = try JSONDecoder().decode(Model.self, from: json)
+        #expect(model.ids.isEmpty)
+    }
+
     @Test("timestamp strategy decodes seconds into a Date")
     func timestampStrategyDecodesDate() throws {
         let json = Data(#"{"flag":true,"ids":[],"createdAt":978307200}"#.utf8)

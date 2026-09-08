@@ -53,3 +53,14 @@ extension LossyCodableArray: Encodable where T: Encodable {
 
 extension LossyCodableArray: Equatable where T: Equatable {}
 extension LossyCodableArray: Hashable where T: Hashable {}
+
+// MARK: - KeyedDecodingContainer
+
+extension KeyedDecodingContainer {
+
+    /// A missing key decodes as an empty array: an absent list and an empty one mean the same
+    /// thing to a lossy field, and the synthesized `Decodable` would otherwise throw on the key.
+    public func decode<T: Decodable>(_: LossyCodableArray<T>.Type, forKey key: Key) throws -> LossyCodableArray<T> {
+        try decodeIfPresent(LossyCodableArray<T>.self, forKey: key) ?? LossyCodableArray(wrappedValue: [])
+    }
+}
