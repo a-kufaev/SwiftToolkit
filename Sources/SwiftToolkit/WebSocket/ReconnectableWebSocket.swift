@@ -23,6 +23,7 @@ public actor ReconnectableWebSocket {
     /// This stream will only finish when ReconnectableWebSocket deinitializes.
     public nonisolated let stateEvents: AsyncStream<WebSocket.StateChangedEvent>
 
+    /// The current connection's state; `.notConnected` once the last connection has been retired.
     public var state: WebSocket.State {
         get async {
             await webSocket?.state ?? .notConnected
@@ -30,21 +31,18 @@ public actor ReconnectableWebSocket {
     }
 
     private let connector: () async -> URLRequest
-    private let urlSession: URLSession
-    private let heartbeats: WebSocket.Heartbeats
+    private let makeConnection: @Sendable (URLRequest) -> any WebSocketConnection
 
     private let messagesContinuation: AsyncStream<WebSocket.Message>.Continuation
-    private var stateEventsContinuation: AsyncStream<WebSocket.StateChangedEvent>.Continuation
+    private let stateEventsContinuation: AsyncStream<WebSocket.StateChangedEvent>.Continuation
 
-    private var messagesTask: Task<Void, Error>?
-    private var stateEventsTask: Task<Void, Error>?
+    private var webSocket: (any WebSocketConnection)?
+    private var isConnecting = false
 
-    private var webSocket: WebSocket?
-
-    /// Create a WebSocket that will automatically reconnect if the connection was lost due to an error.
+    /// Create a WebSocket whose streams survive reconnects. Reconnecting itself is the caller's job: after a
+    /// disconnect, `connect()` may be called again and opens a fresh connection.
     ///
-    /// Every time the WebSocket will (re)connect, the `connector` closure will be called to obtain a
-    /// new `URLRequest` used for (re)connecting the socket.
+    /// Every time the WebSocket (re)connects, the `connector` closure is called to obtain a new `URLRequest`.
     ///
     /// - Parameters:
     ///   - urlSession: The URLSession used when connecting the WebSocket.
@@ -56,17 +54,9 @@ public actor ReconnectableWebSocket {
         heartbeats: WebSocket.Heartbeats = .disabled,
         connector: @escaping () async -> URLRequest
     ) {
-        let (messagesStream, messagesContinuation) = AsyncStream.makeStream(of: WebSocket.Message.self)
-        messages = messagesStream
-        self.messagesContinuation = messagesContinuation
-
-        let (stateEvents, stateEventsContinuation) = AsyncStream.makeStream(of: WebSocket.StateChangedEvent.self)
-        self.stateEvents = stateEvents
-        self.stateEventsContinuation = stateEventsContinuation
-
-        self.urlSession = urlSession
-        self.connector = connector
-        self.heartbeats = heartbeats
+        self.init(connector: connector) { request in
+            WebSocket(request: request, urlSession: urlSession, heartbeats: heartbeats)
+        }
     }
 
     public init(
@@ -77,6 +67,22 @@ public actor ReconnectableWebSocket {
         self.init(urlSession: urlSession, heartbeats: heartbeats) {
             await URLRequest(url: connector())
         }
+    }
+
+    init(
+        connector: @escaping () async -> URLRequest,
+        makeConnection: @escaping @Sendable (URLRequest) -> any WebSocketConnection
+    ) {
+        let (messagesStream, messagesContinuation) = AsyncStream.makeStream(of: WebSocket.Message.self)
+        messages = messagesStream
+        self.messagesContinuation = messagesContinuation
+
+        let (stateEvents, stateEventsContinuation) = AsyncStream.makeStream(of: WebSocket.StateChangedEvent.self)
+        self.stateEvents = stateEvents
+        self.stateEventsContinuation = stateEventsContinuation
+
+        self.connector = connector
+        self.makeConnection = makeConnection
     }
 
     deinit {
@@ -90,15 +96,16 @@ public actor ReconnectableWebSocket {
     public func connect() async throws {
         let validStates = [WebSocket.State.notConnected, .disconnected]
 
-        guard await validStates.contains(state) else {
+        guard !isConnecting, await validStates.contains(state) else {
             throw WebSocketError.alreadyConnectedOrConnecting
         }
+        isConnecting = true
+        defer { isConnecting = false }
 
-        let urlRequest = await connector()
-        let webSocket = WebSocket(request: urlRequest, urlSession: urlSession, heartbeats: heartbeats)
+        let webSocket = await makeConnection(connector())
         self.webSocket = webSocket
 
-        createStreamTasks(for: webSocket)
+        forwardStreams(of: webSocket)
 
         try await webSocket.connect()
     }
@@ -119,9 +126,6 @@ public actor ReconnectableWebSocket {
         }
 
         try await webSocket.disconnect(closeCode: closeCode, reason: reason)
-
-        messagesTask?.cancel()
-        stateEventsTask?.cancel()
     }
 
     // MARK: - Sending Data
@@ -133,60 +137,61 @@ public actor ReconnectableWebSocket {
     ///
     /// - Throws WebSocketError.notConnected when the `send` method is called before the WebSocket is connected.
     public func send(_ value: any Encodable & Sendable) async throws {
-        guard await webSocket?.state == .connected else {
-            throw WebSocketError.notConnected
-        }
-
-        try await webSocket?.send(value)
+        try await liveConnection().send(value)
     }
 
     /// Sends the given `string` through the websocket.
     ///
     /// - Throws WebSocketError.notConnected when the `send` method is called before the WebSocket is connected.
     public func send(_ string: String) async throws {
-        guard await webSocket?.state == .connected else {
-            throw WebSocketError.notConnected
-        }
-
-        try await webSocket?.send(string)
+        try await liveConnection().send(string)
     }
 
     /// Sends the given `data` through the WebSocket.
     ///
     /// - Throws WebSocketError.notConnected when the `send` method is called before the WebSocket is connected.
     public func send(_ data: Data) async throws {
-        guard await webSocket?.state == .connected else {
-            throw WebSocketError.notConnected
-        }
-
-        try await webSocket?.send(data)
+        try await liveConnection().send(data)
     }
 
-    private func createStreamTasks(for webSocket: WebSocket) {
-        messagesTask = Task { [weak self] in
+    // MARK: - Private
+
+    /// One guard for every send. The connection comes back non-optional, so a retire between the check and the
+    /// send can no longer turn `try await webSocket?.send(...)` into a silent success.
+    private func liveConnection() async throws -> any WebSocketConnection {
+        guard let webSocket, await webSocket.state == .connected else {
+            throw WebSocketError.notConnected
+        }
+        return webSocket
+    }
+
+    /// Both forwarders live exactly as long as the connection's streams and are never cancelled. The state
+    /// forwarder is the only place a connection is retired, and only after `.disconnected` has been forwarded.
+    private func forwardStreams(of webSocket: any WebSocketConnection) {
+        Task { [weak self] in
             do {
                 for try await message in webSocket.messages {
-                    guard let self, !Task.isCancelled else { return }
+                    guard let self else { return }
                     messagesContinuation.yield(message)
                 }
             } catch {
-                await self?.handleDisconnect(withError: error)
+                // A throwing finish is always paired with `.disconnected` on `stateEvents`.
             }
         }
 
-        stateEventsTask = Task { [weak self] in
-            for try await state in webSocket.stateEvents {
-                guard let self, !Task.isCancelled else { return }
-                await stateEventsContinuation.yield(state)
+        Task { [weak self] in
+            for await event in webSocket.stateEvents {
+                guard let self else { return }
+                stateEventsContinuation.yield(event)
+                if case .disconnected = event {
+                    await retire(webSocket)
+                }
             }
         }
     }
 
-    private func handleDisconnect(withError _: Error) {
-        webSocket = nil
-        messagesTask?.cancel()
-        messagesTask = nil
-        stateEventsTask?.cancel()
-        stateEventsTask = nil
+    private func retire(_ webSocket: any WebSocketConnection) {
+        guard self.webSocket === webSocket else { return }
+        self.webSocket = nil
     }
 }
