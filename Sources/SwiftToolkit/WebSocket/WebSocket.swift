@@ -36,6 +36,11 @@ public actor WebSocket {
     private var heartbeatTask: Task<Void, Error>?
     private var pingAttempt: Int = .zero
     private let pingQueue = AsyncQueue()
+    private var connectContinuation: CheckedContinuation<Void, Error>?
+    private var disconnectContinuation: CheckedContinuation<Void, Never>?
+
+    /// `disconnect()` waits this long for URLSession to confirm the cancelled task before closing on its own.
+    private static let disconnectTimeout: Duration = .seconds(5)
 
     /// Initializes a new WebSocket.
     ///
@@ -73,6 +78,7 @@ public actor WebSocket {
 
     deinit {
         messagesContinuation.finish()
+        stateEventsContinuation.finish()
         socketTask.cancel()
         socketTaskDelegate = nil
     }
@@ -95,22 +101,16 @@ public actor WebSocket {
 
         do {
             try await withCheckedThrowingContinuation { continuation in
+                connectContinuation = continuation
+
                 let delegate = WebSocketTaskDelegate { _ in
                     await self.handleConnect()
-                    continuation.resume()
 
                 } onWebSocketTaskDidClose: { closeCode, reason in
                     await self.handleDisconnect(withError: nil, closeCode: closeCode, reason: reason)
 
                 } onWebSocketTaskDidCompleteWithError: { error in
-                    guard let error else {
-                        return
-                    }
-                    if case .connecting = await self.state {
-                        continuation.resume(throwing: error)
-                    } else {
-                        await self.handleDisconnect(withError: error, closeCode: nil, reason: nil)
-                    }
+                    await self.handleTaskCompletion(error: error)
                 }
 
                 self.socketTaskDelegate = delegate
@@ -119,7 +119,11 @@ public actor WebSocket {
                 socketTask.resume()
             }
         } catch {
-            state = .notConnected
+            // One-shot: a failed handshake ends this instance the way a disconnect does, so both streams finish
+            // and a second `connect()` on the same instance is refused instead of running against dead streams.
+            state = .disconnected
+            stateEventsContinuation.finish()
+            messagesContinuation.finish()
             throw error
         }
     }
@@ -138,22 +142,23 @@ public actor WebSocket {
         closeCode: URLSessionWebSocketTask.CloseCode = .normalClosure,
         reason: String? = nil
     ) async throws {
-        guard state == .connected else {
+        guard state == .connected, disconnectContinuation == nil else {
             throw WebSocketError.notConnected
         }
 
         socketTask.cancel(with: closeCode, reason: reason?.data(using: .utf8))
 
-        // Wait for the OS to tell us the socketTask is actually disconnected
-        await _ = stateEvents.first { state in
-            switch state {
-            case .disconnected: true
-            default: false
-            }
+        // Wait for the OS to confirm the task ended; `handleDisconnect` resumes this, so `stateEvents` keeps its
+        // single consumer. A callback that never comes must not hang the caller.
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(for: Self.disconnectTimeout)
+            guard !Task.isCancelled else { return }
+            await self?.handleDisconnect(withError: URLError(.timedOut), closeCode: nil, reason: nil)
         }
-
-        messagesContinuation.finish()
-        socketTaskDelegate = nil
+        await withCheckedContinuation { continuation in
+            disconnectContinuation = continuation
+        }
+        timeout.cancel()
     }
 
     // MARK: - Sending Data
@@ -207,7 +212,15 @@ public actor WebSocket {
                     }
                 }
             case let .customMessage(data):
-                try await send(data)
+                do {
+                    try await send(data)
+                } catch {
+                    // A heartbeat that cannot be sent is a dead task the delegate has not reported; close it here
+                    // instead of letting the heartbeat task die unobserved while `state` stays `.connected`.
+                    socketTask.cancel()
+                    handleDisconnect(withError: error, closeCode: nil, reason: nil)
+                    return
+                }
             }
 
             try await Task.sleep(for: interval)
@@ -245,15 +258,20 @@ public actor WebSocket {
             case let .failure(error):
                 self?.messagesContinuation.yield(.invalid(error))
 
-            default:
-                break
+            @unknown default:
+                self?.receive()
             }
         }
     }
 
     private func handleConnect() {
+        // A task that already failed or closed must not be revived by a late didOpen.
+        guard state == .connecting else { return }
+
         state = .connected
         stateEventsContinuation.yield(.connected)
+        connectContinuation?.resume()
+        connectContinuation = nil
 
         receive()
 
@@ -265,11 +283,27 @@ public actor WebSocket {
         }
     }
 
+    private func handleTaskCompletion(error: Error?) {
+        if state == .connecting {
+            // The task ended before it opened: a failed handshake.
+            connectContinuation?.resume(throwing: error ?? URLError(.cancelled))
+            connectContinuation = nil
+            return
+        }
+        // With `error == nil` this normally follows didCloseWith and is a no-op below; without a prior close
+        // frame the task is dead all the same, so it must not leave `state` at `.connected`.
+        handleDisconnect(withError: error, closeCode: nil, reason: nil)
+    }
+
     private func handleDisconnect(
         withError error: Error?,
         closeCode: URLSessionWebSocketTask.CloseCode?,
         reason: Data?
     ) {
+        // didCloseWith, didCompleteWithError, a failed heartbeat and the disconnect timeout can all report the
+        // same death; the first one wins.
+        guard state == .connected else { return }
+
         state = .disconnected
         stateEventsContinuation.yield(
             .disconnected(
@@ -283,6 +317,9 @@ public actor WebSocket {
         messagesContinuation.finish(throwing: error)
         socketTaskDelegate = nil
         stopHeartbeats()
+
+        disconnectContinuation?.resume()
+        disconnectContinuation = nil
     }
 }
 

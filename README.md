@@ -51,7 +51,7 @@ dependencies: [
 - **`BroadcastStream`** — an actor-based pub/sub that fans one event out to many subscribers.
 - **`TaskDebouncer`** — debounces async work; only the last call within the window runs.
 - **`InFlightTaskDeduplicator`** — coalesces concurrent operations sharing a key into a single task.
-- **`WebSocket`** / **`ReconnectableWebSocket`** — an `async`/`await` WebSocket client over `URLSessionWebSocketTask` with message/state streams, heartbeats, and automatic reconnection.
+- **`WebSocket`** / **`ReconnectableWebSocket`** — an `async`/`await` WebSocket client over `URLSessionWebSocketTask` with message/state streams, heartbeats, and a reconnect-friendly wrapper whose streams survive reconnects.
 
 ```swift
 let debouncer = TaskDebouncer(seconds: 0.3)
